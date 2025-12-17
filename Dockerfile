@@ -117,6 +117,10 @@ RUN cd /opt/librealsense/build && \
 # Note: You may need to pip install pyrealsense2 bindings separately inside your conda env or system python
 RUN conda run -n polymetis-local pip install pyrealsense2
 RUN conda run -n polymetis-local pip install opencv-python
+RUN conda run -n polymetis-local pip install pyzmq
+RUN conda run -n polymetis-local pip install websockets
+
+
 WORKDIR /app
 
 CMD ["/bin/bash"]

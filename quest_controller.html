@@ -39,11 +39,15 @@
         <div>Position: <span id="position">-</span></div>
         <div>Trigger: <span id="trigger">0.0</span></div>
         <div>Grip: <span id="grip">0.0</span></div>
+        <div>Button A: <span id="btn-a">0</span></div>
+        <div>Button B: <span id="btn-b">0</span></div>
         <hr>
         <div style="font-size: 12px;">
             <div>🎮 Right Controller: Position/Rotation</div>
             <div>🔫 Trigger: Gripper</div>
             <div>✊ Grip: Toggle Recording</div>
+            <div>🅰️ Button A: Aux 1</div>
+            <div>🅱️ Button B: Aux 2</div>
         </div>
     </div>
 
@@ -76,6 +80,8 @@
         const positionEl = document.getElementById('position');
         const triggerEl = document.getElementById('trigger');
         const gripEl = document.getElementById('grip');
+        const btnAEl = document.getElementById('btn-a');
+        const btnBEl = document.getElementById('btn-b');
 
         init();
         animate();
@@ -219,15 +225,25 @@
                             const pos = pose.transform.position;
                             const orient = pose.transform.orientation;
 
-                            // Button values
+                            // === BUTTON MAPPING FOR QUEST CONTROLLERS ===
+                            // 0: Trigger
+                            // 1: Grip (Squeeze)
+                            // 3: Thumbstick Press
+                            // 4: A Button (Primary)
+                            // 5: B Button (Secondary)
+                            
                             const triggerValue = source.gamepad?.buttons[0]?.value || 0;
                             const gripValue = source.gamepad?.buttons[1]?.value || 0;
+                            const btnAValue = source.gamepad?.buttons[4]?.value || 0;
+                            const btnBValue = source.gamepad?.buttons[5]?.value || 0;
 
                             const data = {
                                 position: [pos.x, pos.y, pos.z],
                                 orientation: [orient.x, orient.y, orient.z, orient.w],
                                 trigger: triggerValue,
-                                grip: gripValue
+                                grip: gripValue,
+                                button_a: btnAValue,
+                                button_b: btnBValue
                             };
 
                             try {
@@ -237,10 +253,14 @@
                                 positionEl.textContent = `${pos.x.toFixed(3)}, ${pos.y.toFixed(3)}, ${pos.z.toFixed(3)}`;
                                 triggerEl.textContent = triggerValue.toFixed(2);
                                 gripEl.textContent = gripValue.toFixed(2);
+                                btnAEl.textContent = btnAValue.toFixed(0);
+                                btnBEl.textContent = btnBValue.toFixed(0);
 
                                 // Visual feedback for buttons
                                 triggerEl.style.color = triggerValue > 0.5 ? '#00ff00' : '#ffffff';
                                 gripEl.style.color = gripValue > 0.5 ? '#ffaa00' : '#ffffff';
+                                btnAEl.style.color = btnAValue > 0.5 ? '#00ffff' : '#ffffff';
+                                btnBEl.style.color = btnBValue > 0.5 ? '#00ffff' : '#ffffff';
 
                             } catch (e) {
                                 console.error('Send failed:', e);

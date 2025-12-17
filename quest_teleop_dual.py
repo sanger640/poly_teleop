@@ -7,72 +7,120 @@ from polymetis import RobotInterface, GripperInterface
 from scipy.spatial.transform import Rotation as R
 import ssl
 import time
-import grpc  # for RpcError checks
+import grpc
 import pyrealsense2 as rs
 import cv2
 import os
 import threading
 import queue
+import shutil
 
 MAX_POSITION_STEP = 0.02   # smaller step for safety
 WORKSPACE_RADIUS = 0.25    # slightly smaller workspace
 WORKSPACE_MIN_Z = 0.08
 ROBOT_BASE = np.array([0.0, 0.0, 0.0])
 
-class RealSenseRGBRecorder:
-    def __init__(self, i=0):
-        self.pipeline = rs.pipeline()
-        config = rs.config()
-        config.enable_stream(rs.stream.color, 320, 240, rs.format.bgr8, 30)
-        self.pipeline.start(config)
-        self.i = i
-        self.save_folder = "episodes/" + str(self.i) + "/rgb_frames/" 
-        os.makedirs(self.save_folder, exist_ok=True)
+# --- CONFIGURATION ---
+# REPLACE THESE WITH YOUR ACTUAL CAMERA SERIAL NUMBERS
+CAMERA_1_SERIAL = "215222078938" 
+CAMERA_2_SERIAL = "819612070440"
+SSD_LOC="/mnt/diffusion_policy/tasks/pick_place/dual_wrist/"
+# ---------------------
 
-        self.frame_queue = queue.Queue(maxsize=2000)  # buffer to store frames before saving
-        self.running = False  # start stopped
+class MultiCameraRecorder:
+    def __init__(self, i=0):
+        self.i = i
+        self.save_folder = SSD_LOC+"episodes/" + str(self.i) + "/rgb_frames/" 
+        os.makedirs(self.save_folder, exist_ok=True)
+        self.running = False
+        
+        # Pipelines for two cameras
+        self.pipeline1 = rs.pipeline()
+        self.config1 = rs.config()
+        self.config1.enable_device(CAMERA_1_SERIAL)
+        self.config1.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+
+        self.pipeline2 = rs.pipeline()
+        self.config2 = rs.config()
+        self.config2.enable_device(CAMERA_2_SERIAL)
+        self.config2.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+
+        self.frame_queue = queue.Queue(maxsize=2000)
 
     def start(self):
         if not self.running:
-            self.running = True
-            self.saving_thread = threading.Thread(target=self._saving_worker, daemon=True)
-            self.saving_thread.start()
-            self.rgb_thread = threading.Thread(target=self.capture_frame)
-            self.rgb_thread.start()
-
-    def capture_frame(self):
-        while self.running:
-            frames = self.pipeline.wait_for_frames()
-            color_frame = frames.get_color_frame()
-            if not color_frame:
-                return
-            img = np.asanyarray(color_frame.get_data())
-            timestamp = time.time()
-            self.latest_rgb_timestamp = timestamp
             try:
-                self.frame_queue.put_nowait((timestamp, img))
-            except queue.Full:
-                print("[WARNING] Frame queue full, dropping frame")
+                self.pipeline1.start(self.config1)
+                print(f"Camera 1 ({CAMERA_1_SERIAL}) started.")
+                self.pipeline2.start(self.config2)
+                print(f"Camera 2 ({CAMERA_2_SERIAL}) started.")
+            except RuntimeError as e:
+                print(f"Error starting cameras: {e}")
+                return
 
-    def _saving_worker(self):
+            self.running = True
+            
+            # Thread for capturing frames
+            self.capture_thread = threading.Thread(target=self._capture_worker, daemon=True)
+            self.capture_thread.start()
+            
+            # Thread for saving to disk (IO bound)
+            self.save_thread = threading.Thread(target=self._save_worker, daemon=True)
+            self.save_thread.start()
+
+    def _capture_worker(self):
+        while self.running:
+            # Wait for frames from both cameras
+            # Note: This might reduce FPS to the slower camera
+            frames1 = self.pipeline1.wait_for_frames()
+            frames2 = self.pipeline2.wait_for_frames()
+            
+            color_frame1 = frames1.get_color_frame()
+            color_frame2 = frames2.get_color_frame()
+            
+            if not color_frame1 or not color_frame2:
+                continue
+                
+            img1 = np.asanyarray(color_frame1.get_data())
+            img2 = np.asanyarray(color_frame2.get_data())
+            timestamp = time.time()
+            
+            try:
+                # Put both images in the queue
+                self.frame_queue.put_nowait((timestamp, img1, img2))
+            except queue.Full:
+                pass # Drop frame if disk is too slow
+
+    def _save_worker(self):
         while self.running or not self.frame_queue.empty():
             try:
-                timestamp, img = self.frame_queue.get(timeout=0.1)
-                filename = os.path.join(self.save_folder, f"{int(timestamp * 1000)}.png")
-                cv2.imwrite(filename, img)
+                timestamp, img1, img2 = self.frame_queue.get(timeout=0.1)
+                
+                # Save Camera 1
+                fname1 = os.path.join(self.save_folder, f"cam1_{int(timestamp * 1000)}.png")
+                cv2.imwrite(fname1, img1)
+                
+                # Save Camera 2
+                fname2 = os.path.join(self.save_folder, f"cam2_{int(timestamp * 1000)}.png")
+                cv2.imwrite(fname2, img2)
+                
                 self.frame_queue.task_done()
             except queue.Empty:
-                pass  # wait for frames
+                pass
 
     def stop(self):
-        if self.running:
-            self.running = False
-            self.saving_thread.join()
-            self.rgb_thread.join()
-            # self.pipeline.stop()
-            # self.i += 1
-            # self.save_folder = "epsiodes/" + self.i + "/rgb_frames/" 
-
+        self.running = False
+        if hasattr(self, 'capture_thread'):
+            self.capture_thread.join()
+        if hasattr(self, 'save_thread'):
+            self.save_thread.join()
+        
+        try:
+            self.pipeline1.stop()
+            self.pipeline2.stop()
+        except:
+            pass
+        print("Cameras stopped.")
 
 class AdvancedQuestRobotTeleop:
     """Advanced teleoperation with position AND orientation control"""
@@ -85,8 +133,6 @@ class AdvancedQuestRobotTeleop:
         self.enable_orientation = enable_orientation
 
         # Start impedance controller (softer gains)
-        # self.Kx = torch.Tensor([160, 160, 160, 15, 15, 15])
-        # self.Kxd = torch.Tensor([15, 15, 15, 2, 2, 2])
         self.Kx = torch.Tensor([750, 750, 750, 15, 15, 15])
         self.Kxd = torch.Tensor([37, 37, 37, 2, 2, 2])
         self.robot.start_cartesian_impedance(Kx=self.Kx, Kxd=self.Kxd)
@@ -107,7 +153,7 @@ class AdvancedQuestRobotTeleop:
 
         # Control parameters (slow & gentle)
         self.position_scale = np.array([1.2, 1.2, 2.2])
-        self.rotation_scale = 0.3  # kept for future use if you scale rotation
+        self.rotation_scale = 0.3  
 
         # For control-rate throttling (~10 Hz)
         self.last_command_time = 0.0
@@ -122,9 +168,9 @@ class AdvancedQuestRobotTeleop:
         self.prev_controller_quat = None
 
         # Deadband parameters
-        self.DEADBAND_POS = 0.01  # 1 cm deadband in robot-frame controller pos
-        self.DEADBAND_EE = 0.005  # 5 mm deadband on EE target position
-        self.DEADBAND_ORI_RAD = np.deg2rad(3)  # 3 degrees deadband on EE orientation
+        self.DEADBAND_POS = 0.01  
+        self.DEADBAND_EE = 0.005  
+        self.DEADBAND_ORI_RAD = np.deg2rad(3) 
 
         # Recording
         self.recording = False
@@ -134,9 +180,9 @@ class AdvancedQuestRobotTeleop:
         # Gripper state
         self.last_gripper_closed = False
 
-        # Initialize recorder but do not start RGB thread yet
-        self.i = 36
-        self.recorder = RealSenseRGBRecorder(self.i)
+        # Initialize Multi-Camera Recorder
+        self.i = 1
+        self.recorder = MultiCameraRecorder(self.i)
 
         self.track = False
         self.pos_delta = 0
@@ -200,12 +246,12 @@ class AdvancedQuestRobotTeleop:
                     self.track = False
 
                 if self.track == True:
+
                     # Calibrate on first message
                     if not self.calibrated:
-                        # print("calibrating")
                         self.calibrate(controller_pos, controller_quat)
                         continue
-                    # print(self.initial_controller_pos)
+
                     # === POSITION DEADBAND ON CONTROLLER INPUT ===
                     controller_pos_robot = self.transform_controller_to_robot(controller_pos)
                     delta_ctrl = np.linalg.norm(controller_pos_robot - self.prev_controller_pos) if self.prev_controller_pos is not None else np.inf
@@ -217,14 +263,11 @@ class AdvancedQuestRobotTeleop:
                     self.pos_delta = (controller_pos_robot - self.initial_controller_pos) * self.position_scale
                     target_pos = self.initial_robot_pos.numpy() + self.pos_delta
 
-
                     # === DEAD BAND ON EE TARGET POSITION ===
                     if self.prev_target_pos is not None:
                         delta_ee = np.linalg.norm(target_pos - self.prev_target_pos)
                         if delta_ee < self.DEADBAND_EE:
                             target_pos = self.prev_target_pos.copy()
-
-
 
                     # === VELOCITY LIMITING ===
                     dt = now - self.prev_time
@@ -234,7 +277,7 @@ class AdvancedQuestRobotTeleop:
                         if vel > self.max_velocity and dist > 1e-6:
                             direction = (target_pos - self.prev_target_pos) / dist
                             target_pos = self.prev_target_pos + direction * self.max_velocity * dt
-                            print(f"[VELOCITY LIMIT] Clamped EE speed to {self.max_velocity:.3f} m/s")
+                            # print(f"[VELOCITY LIMIT] Clamped EE speed to {self.max_velocity:.3f} m/s")
                     self.prev_time = now
 
                     self.prev_target_pos = target_pos.copy()
@@ -244,17 +287,15 @@ class AdvancedQuestRobotTeleop:
                     if self.enable_orientation:
                         current_controller_rot = R.from_quat(self.transform_controller_quat(controller_quat))
                         delta_rot = current_controller_rot * self.initial_controller_rot.inv()
-
+                        
                         angle = delta_rot.magnitude()  # rotation angle in radians
                         if angle < self.DEADBAND_ORI_RAD and self.prev_target_quat is not None:
                             target_quat = self.prev_target_quat.copy()
                         else:
                             target_rot = delta_rot * self.initial_robot_rot
                             target_quat = target_rot.as_quat()
-
                         
                         self.prev_target_quat = target_quat.copy()
-
                         target_quat_tensor = torch.Tensor(target_quat)
                     else:
                         target_quat_tensor = self.initial_robot_quat
@@ -262,6 +303,7 @@ class AdvancedQuestRobotTeleop:
                     self.prev_controller_pos = controller_pos.copy()
                     self.prev_controller_quat = controller_quat.copy()
 
+                    # Update robot pose with error recovery
                     try:
                         self.robot.update_desired_ee_pose(
                             position=target_pos_tensor,
@@ -269,11 +311,7 @@ class AdvancedQuestRobotTeleop:
                         )
                     except grpc.RpcError as e:
                         msg = str(e)
-                        if (
-                            "no controller running" in msg
-                            or "power_limit_violation" in msg
-                            or "Safety limits exceeded" in msg
-                        ):
+                        if "no controller running" in msg or "power_limit_violation" in msg or "Safety limits exceeded" in msg:
                             print(f"[ERROR] {msg}. Restarting Cartesian impedance controller...")
                             self.robot.start_cartesian_impedance(Kx=self.Kx, Kxd=self.Kxd)
                             self.robot.update_desired_ee_pose(
@@ -294,11 +332,7 @@ class AdvancedQuestRobotTeleop:
                             self.gripper.stop()
                             self.gripper.goto(width=0.25, speed=0.05, force=0.1)
                         self.last_gripper_closed = gripper_closed
-                    # Recording toggle
-                    # if grip_button > 0.5:
-                    #     self._grip_pressed = not self._grip_pressed
-                    #     print("grip button test")
-                    #     self.toggle_recording()
+
                     # Grip button logic to start/stop recording
                     if grip_button > 0.5 and not self._grip_pressed:
                         self._grip_pressed = True
@@ -313,22 +347,16 @@ class AdvancedQuestRobotTeleop:
                         self.save_trajectory()
                         self.recorder.stop()
                         self.recorder.i += 1
-                        self.recorder.save_folder = "episodes/" + str(self.i) + "/rgb_frames/"
+                        self.recorder.save_folder = SSD_LOC+"episodes/" + str(self.i) + "/rgb_frames/"
                         os.makedirs(self.recorder.save_folder, exist_ok=True)
-                        print("Grip released. Stopping recording.")
-                        
+                        print(f"\n⏹ RECORDING STOPPED ({len(self.trajectory_data)} waypoints)")
 
                     if self.recording:
+                        # Record the command we just sent (target pose)
                         if self.enable_orientation:
                             self.record_waypoint(target_pos_tensor, target_quat_tensor, gripper_closed)
                         else:
                             self.record_waypoint(target_pos_tensor, self.initial_robot_quat, gripper_closed)
-                    # Record pose at 10Hz as before
-                    # pose_dict = {
-                    #     'position': target_pos,
-                    #     'orientation': target_quat_tensor.numpy() if self.enable_orientation else self.initial_robot_quat.numpy()
-                    # }
-                    # self.recorder.record_ee_pose(pose_dict)
 
             except json.JSONDecodeError as e:
                 print(f"JSON decode error: {e}")
@@ -336,7 +364,6 @@ class AdvancedQuestRobotTeleop:
                 print(f"Error processing data: {e}")
                 import traceback
                 traceback.print_exc()
-        
 
     def record_waypoint(self, position, orientation, gripper):
         timestamp = time.time()
@@ -353,7 +380,7 @@ class AdvancedQuestRobotTeleop:
             return
 
         import time as _time
-        filename = f"episodes/{self.i}/trajectory_{int(_time.time())}.json"
+        filename = f"{SSD_LOC}episodes/{self.i}/trajectory_{int(_time.time())}.json"
 
         trajectory = {
             'metadata': {
@@ -369,13 +396,6 @@ class AdvancedQuestRobotTeleop:
 
         print(f"✓ Saved trajectory to: {filename}")
         self.i +=1
-
-    def cleanup(self):
-        print("\nCleaning up...")
-        if self.recording:
-            self.save_trajectory()
-        self.robot.terminate_current_policy()
-        print("Done!")
 
 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ssl_context.load_cert_chain(certfile='cert.pem', keyfile='key.pem')

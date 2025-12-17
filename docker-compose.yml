@@ -24,6 +24,7 @@ services:
       - /dev:/dev
       - /var/run:/var/run
       - /sys:/sys:rw
+      - /mnt/ssd_data/diffusion_policy:/mnt/diffusion_policy
     environment:
       - DISPLAY=${DISPLAY}
     working_dir: /app
