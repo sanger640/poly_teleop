@@ -11,7 +11,7 @@ This repository utilizes [Polymetis](https://github.com/facebookresearch/fairo/t
 
 <div style="display: flex; justify-content: space-around;">
   <img src="assets/trials.gif" width="48%" />
-  <img src="assets/trials.gif" width="48%" />
+  <img src="assets/trials_move_cup.gif" width="48%" />
   <p><i>Diffusion Policy in action</i></p>
 </div>
 
