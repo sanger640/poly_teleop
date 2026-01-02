@@ -9,6 +9,11 @@ This repository implements the following functionalities:
 There is a Dockerfile provided (along with docker compose) to setup the enviornment to run the scripts.
 This repository utilizes [Polymetis](https://github.com/facebookresearch/fairo/tree/main/polymetis) send realtime cartesian commands to the Franka Robot.
 
+<div style="display: flex; justify-content: space-around;">
+  <img src="assets/diff_policy_dual_1.mp4" width="48%" />
+  <img src="assets/diff_policy_dual_2.mp4" width="48%" />
+</div>
+
 ## Hardware Setup
 - Robot: Frank Panda Emika Robot
     - IP: "129.97.71.19"
