@@ -77,7 +77,7 @@ python host_server.py
 - Terminal 4 : Run the teleop script which listens to the Meta Controller commands (controller pose + button commands) and outputs robot cartesian pose commands, gripper commands (open/close) and whether to start/end recording of a given demonstration (episode). 
 ```bash
 python home.py # to reset the robot to a determined home pose
-python quest_teleop4.py
+python quest_teleop_dual.py
 ```
 
 - Connect to the hosted server on the Meta Quest Pro Browser and enter VR mode.

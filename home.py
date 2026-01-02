@@ -2,7 +2,7 @@ import numpy as np
 from polymetis import RobotInterface, GripperInterface
 
 def main():
-    # use ethernet port of the host
+    # takes robot to home pose
     robot = RobotInterface(ip_address="129.97.71.27")
     gripper = GripperInterface(ip_address="129.97.71.27")
     target_position = np.array([0.5579355,   0.19265589,  0.3486197])
